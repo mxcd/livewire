@@ -27,6 +27,11 @@ type EngineOptions struct {
 	OnChange func(Change)
 	// CheckOrigin overrides the WebSocket origin check (same host by default).
 	CheckOrigin func(r *http.Request) bool
+	// Revalidate refreshes a socket's identity before every subscribe and re-run, so a
+	// revoked key or a lost role takes effect on open sockets too. It returns the context
+	// the checks and loaders then see; an error closes the socket. Nil keeps the context
+	// of the upgrade request for the socket's lifetime.
+	Revalidate func(ctx context.Context) (context.Context, error)
 }
 
 // Engine serves live subscriptions: it re-runs a subscription's loader whenever a table
@@ -224,7 +229,11 @@ func (s *socket) subscribe(frame ClientFrame) {
 		return v, ok
 	})
 	if err == nil {
-		err = res.Read(s.ctx)
+		var ctx context.Context
+		if ctx, err = s.identity(); err != nil {
+			return
+		}
+		err = res.Read(ctx)
 	}
 	if err != nil {
 		s.enqueue(ResponseFrame{ID: frame.ID, Error: asError(err)})
@@ -239,6 +248,20 @@ func (s *socket) subscribe(frame ClientFrame) {
 	s.enqueue(ResponseFrame{ID: frame.ID, OK: true, Subscription: sub.id})
 	sub.markDirty(true)
 	go sub.run()
+}
+
+// identity revalidates the socket's caller; on failure the socket is closed.
+func (s *socket) identity() (context.Context, error) {
+	revalidate := s.engine.options.Revalidate
+	if revalidate == nil {
+		return s.ctx, nil
+	}
+	ctx, err := revalidate(s.ctx)
+	if err != nil {
+		s.close(CloseUnauthorized, "access revoked")
+		return nil, err
+	}
+	return ctx, nil
 }
 
 func (s *socket) unsubscribe(id string) {
@@ -261,6 +284,7 @@ type subscription struct {
 	// collapse into one follow-up.
 	dirty    chan struct{}
 	snapshot atomic.Bool
+	failures int
 	seq      int64
 	list     *listState
 	object   json.RawMessage
@@ -292,23 +316,36 @@ func (s *subscription) run() {
 
 // refresh re-runs the loader and pushes what changed. It returns false when the
 // subscription is over.
-func (s *subscription) refresh() bool {
+func (s *subscription) refresh() (alive bool) {
 	snapshot := s.snapshot.Swap(false)
-	data, err := s.resource.Get(s.ctx, s.params)
+	defer func() {
+		// A panicking loader must cost one subscription a retry, never the process.
+		if r := recover(); r != nil {
+			log.Error().Interface("panic", r).Str("target", s.resource.Name).Msg("livewire: re-run panicked")
+			s.retryLater(snapshot)
+			alive = true
+		}
+	}()
+	ctx, err := s.socket.identity()
+	if err != nil {
+		return false
+	}
+	data, err := s.resource.Get(ctx, s.params)
 	if s.ctx.Err() != nil {
 		return false
 	}
 	if err != nil {
 		e := asError(err)
 		if e.Status >= http.StatusInternalServerError {
-			// Transient: keep the subscription, the next change retries.
 			log.Error().Err(err).Str("target", s.resource.Name).Msg("livewire: re-run failed")
+			s.retryLater(snapshot)
 			return true
 		}
 		payload, _ := json.Marshal(e)
 		s.push(PushError, payload)
 		return false
 	}
+	s.failures = 0
 	if !s.resource.List {
 		raw, err := json.Marshal(data)
 		if err != nil {
@@ -337,6 +374,21 @@ func (s *subscription) refresh() bool {
 		s.push(PushDiff, payload)
 	}
 	return true
+}
+
+// retryLater re-runs a failed subscription with backoff (1 s doubling to 30 s), so a
+// transient database error does not leave it stale until the next change.
+func (s *subscription) retryLater(snapshot bool) {
+	if snapshot {
+		s.snapshot.Store(true)
+	}
+	delay := min(time.Second<<min(s.failures, 5), 30*time.Second)
+	s.failures++
+	time.AfterFunc(delay, func() {
+		if s.ctx.Err() == nil {
+			s.markDirty(false)
+		}
+	})
 }
 
 func (s *subscription) push(kind string, payload json.RawMessage) {

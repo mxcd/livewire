@@ -58,7 +58,13 @@ export async function request<T>(
     throw new NetworkError(String(e))
   }
   if (response.status === 204) return undefined as T
-  const text = await response.text()
+  let text: string
+  try {
+    text = await response.text()
+  } catch (e) {
+    // The connection died while the body was on its way.
+    throw new NetworkError(String(e))
+  }
   const data: unknown = text ? JSON.parse(text) : undefined
   if (!response.ok) {
     if (response.status === 401) config.onUnauthorized()
@@ -123,6 +129,7 @@ export class LiveConnection {
   private attempt = 0
   private retryTimer?: ReturnType<typeof setTimeout>
   private pingTimer?: ReturnType<typeof setInterval>
+  private lastMessage = 0
 
   constructor() {
     if (typeof window === 'undefined') return
@@ -182,9 +189,21 @@ export class LiveConnection {
       this.attempt = 0
       this.setStatus('live')
       for (const [id, subscription] of this.subscriptions) this.sendSubscribe(id, subscription)
-      this.pingTimer = setInterval(() => this.send({ id: String(++this.lastId), op: 'ping' }), 25_000)
+      this.lastMessage = Date.now()
+      // Every ping is answered, so silence means a half-open socket (a phone that switched
+      // networks): close it and let the reconnect take over.
+      this.pingTimer = setInterval(() => {
+        if (Date.now() - this.lastMessage > 60_000) {
+          socket.close()
+          return
+        }
+        this.send({ id: String(++this.lastId), op: 'ping' })
+      }, 25_000)
     }
-    socket.onmessage = (event) => this.receive(JSON.parse(String(event.data)) as ResponseFrame | PushFrame)
+    socket.onmessage = (event) => {
+      this.lastMessage = Date.now()
+      this.receive(JSON.parse(String(event.data)) as ResponseFrame | PushFrame)
+    }
     socket.onclose = (event) => {
       clearInterval(this.pingTimer)
       this.socket = undefined

@@ -31,7 +31,11 @@ func newListState(list any) (*listState, error) {
 		if err := json.Unmarshal(item, &keyed); err != nil || len(keyed.ID) == 0 {
 			return nil, fmt.Errorf("livewire: list item without an id: %s", item)
 		}
-		id := string(bytes.Trim(keyed.ID, `"`))
+		var id string
+		if err := json.Unmarshal(keyed.ID, &id); err != nil {
+			// A numeric id.
+			id = string(keyed.ID)
+		}
 		state.order = append(state.order, id)
 		state.items[id] = item
 	}

@@ -52,7 +52,7 @@ export async function request<T>(
       method,
       credentials: 'include',
       headers,
-      body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+      ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
     })
   } catch (e) {
     throw new NetworkError(String(e))
@@ -68,7 +68,7 @@ export async function request<T>(
   const data: unknown = text ? JSON.parse(text) : undefined
   if (!response.ok) {
     if (response.status === 401) config.onUnauthorized()
-    // go-basicauth answers {error, message}; livewire {code, message, fields}.
+    // livewire answers {code, message, fields}; auth middleware in front of it often {error, message}.
     const body = (data ?? {}) as Partial<WireError> & { error?: string }
     throw new ApiError(response.status, body.code ?? body.error ?? 'internal', body.message ?? response.statusText, body.fields)
   }
@@ -120,15 +120,15 @@ interface PushFrame {
 /** One WebSocket for the whole app: reconnects with backoff and resubscribes everything. */
 export class LiveConnection {
   status: LiveStatus = 'offline'
-  private socket?: WebSocket
+  private socket: WebSocket | undefined
   private subscriptions = new Map<number, Subscription>()
   private byServerId = new Map<string, number>()
   private pending = new Map<string, (frame: ResponseFrame) => void>()
   private statusListeners = new Set<(status: LiveStatus) => void>()
   private lastId = 0
   private attempt = 0
-  private retryTimer?: ReturnType<typeof setTimeout>
-  private pingTimer?: ReturnType<typeof setInterval>
+  private retryTimer: ReturnType<typeof setTimeout> | undefined
+  private pingTimer: ReturnType<typeof setInterval> | undefined
   private lastMessage = 0
 
   constructor() {
@@ -209,7 +209,7 @@ export class LiveConnection {
       this.socket = undefined
       this.byServerId.clear()
       this.pending.clear()
-      for (const subscription of this.subscriptions.values()) subscription.serverId = undefined
+      for (const subscription of this.subscriptions.values()) delete subscription.serverId
       this.setStatus('offline')
       if (event.code === 4401) config.onUnauthorized()
       if (this.subscriptions.size === 0) return
@@ -242,17 +242,18 @@ export class LiveConnection {
   private sendSubscribe(id: number, subscription: Subscription) {
     const requestId = String(++this.lastId)
     this.pending.set(requestId, (frame) => {
-      if (!frame.ok) {
+      const serverId = frame.subscription
+      if (!frame.ok || serverId === undefined) {
         const error = frame.error
         subscription.onError(new ApiError(0, error?.code ?? 'internal', error?.message ?? 'Subscription failed'))
         return
       }
       if (!this.subscriptions.has(id)) {
-        this.send({ id: String(++this.lastId), op: 'unsubscribe', subscription: frame.subscription })
+        this.send({ id: String(++this.lastId), op: 'unsubscribe', subscription: serverId })
         return
       }
-      subscription.serverId = frame.subscription
-      this.byServerId.set(frame.subscription as string, id)
+      subscription.serverId = serverId
+      this.byServerId.set(serverId, id)
     })
     this.send({ id: requestId, op: 'subscribe', target: subscription.target.name, params: subscription.params })
   }

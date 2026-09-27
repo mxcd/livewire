@@ -1,0 +1,8 @@
+{
+  "name": "livewire-gen-typecheck",
+  "private": true,
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vue": "3.5.22"
+  }
+}

@@ -67,6 +67,15 @@ func typescriptTypes(ts *types) string {
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
 
+// tsRef is a type as api.ts names it: named structs live in types.ts, everything else is
+// spelled out.
+func tsRef(t reflect.Type) string {
+	if classify(t) == kindStruct && t.Name() != "" {
+		return "T." + t.Name()
+	}
+	return tsType(t)
+}
+
 func typescriptAPI(registry *livewire.Registry) string {
 	var b strings.Builder
 	b.WriteString(generatedHeader)
@@ -75,7 +84,7 @@ func typescriptAPI(registry *livewire.Registry) string {
 	var liveTargets []string
 	for _, res := range registry.Resources {
 		name := upperFirst(res.Name)
-		result := "T." + tsType(res.DTO)
+		result := tsRef(res.DTO)
 		if res.List {
 			result += "[]"
 		}
@@ -94,12 +103,12 @@ func typescriptAPI(registry *livewire.Registry) string {
 		}
 		body := ""
 		if m.HasBody() {
-			args = append(args, "body: T."+tsType(m.Request))
+			args = append(args, "body: "+tsRef(m.Request))
 			body = ", { body }"
 		}
 		result := "void"
 		if m.Status() != 204 {
-			result = "T." + tsType(m.Response)
+			result = tsRef(m.Response)
 		}
 		fmt.Fprintf(&b, "export function %s(%s): Promise<%s> {\n  return request('%s', %s%s)\n}\n\n",
 			m.Name, strings.Join(args, ", "), result, m.Method, tsPath(m.Path), body)

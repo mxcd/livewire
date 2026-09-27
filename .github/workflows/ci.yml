@@ -22,5 +22,8 @@ jobs:
         run: go vet ./...
       - name: Test (race)
         run: go test -race ./...
+      # Run on its own so a skipped test (no bun) cannot pass as a green one.
       - name: Generated client type-checks (exactOptionalPropertyTypes)
-        run: go test -count=1 -v -run TestGeneratedClientTypeChecks ./gen/ | tee /dev/stderr | grep -q -- '--- PASS: TestGeneratedClientTypeChecks'
+        run: |
+          go test -count=1 -v -run TestGeneratedClientTypeChecks ./gen/ | tee test.log
+          grep -q -- '--- PASS: TestGeneratedClientTypeChecks' test.log

@@ -219,7 +219,8 @@ func (s *socket) close(code int, reason string) {
 }
 
 func (s *socket) subscribe(frame ClientFrame) {
-	res := s.engine.options.Registry.Resource(frame.Target)
+	registry := s.engine.options.Registry
+	res := registry.Resource(frame.Target)
 	if res == nil || !res.Live() {
 		s.enqueue(ResponseFrame{ID: frame.ID, Error: Errorf(http.StatusNotFound, CodeNotFound, "No live target %q", frame.Target)})
 		return
@@ -233,10 +234,12 @@ func (s *socket) subscribe(frame ClientFrame) {
 		if ctx, err = s.identity(); err != nil {
 			return
 		}
-		err = res.Read(ctx)
+		if ctx, err = registry.context(ctx, params); err == nil {
+			err = res.Read(ctx)
+		}
 	}
 	if err != nil {
-		s.enqueue(ResponseFrame{ID: frame.ID, Error: asError(err)})
+		s.enqueue(ResponseFrame{ID: frame.ID, Error: registry.asError(err)})
 		return
 	}
 	s.mutex.Lock()
@@ -330,12 +333,13 @@ func (s *subscription) refresh() (alive bool) {
 	if err != nil {
 		return false
 	}
-	data, err := s.resource.Get(ctx, s.params)
+	registry := s.socket.engine.options.Registry
+	data, err := registry.read(ctx, s.resource, s.params)
 	if s.ctx.Err() != nil {
 		return false
 	}
 	if err != nil {
-		e := asError(err)
+		e := registry.asError(err)
 		if e.Status >= http.StatusInternalServerError {
 			log.Error().Err(err).Str("target", s.resource.Name).Msg("livewire: re-run failed")
 			s.retryLater(snapshot)

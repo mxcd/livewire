@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,29 +33,29 @@ func (r *Registry) Mount(group gin.IRoutes) {
 	})
 	for _, res := range r.Resources {
 		res := res
-		group.GET(res.Path, func(c *gin.Context) {
+		group.GET(res.Path, append(slices.Clone(res.Middleware), func(c *gin.Context) {
 			params, err := decodeParams(res.Params, ginSource(c))
 			if err == nil {
 				var payload any
-				if payload, err = res.Get(c.Request.Context(), params); err == nil {
+				if payload, err = r.read(c.Request.Context(), res, params); err == nil {
 					c.JSON(http.StatusOK, payload)
 					return
 				}
 			}
-			writeError(c, err)
-		})
+			r.writeError(c, err)
+		})...)
 	}
 	for _, m := range r.Mutations {
 		m := m
-		group.Handle(m.Method, m.Path, func(c *gin.Context) {
-			if err := m.serve(c); err != nil {
-				writeError(c, err)
+		group.Handle(m.Method, m.Path, append(slices.Clone(m.Middleware), func(c *gin.Context) {
+			if err := r.serve(c, m); err != nil {
+				r.writeError(c, err)
 			}
-		})
+		})...)
 	}
 }
 
-// Get authorizes and loads a resource.
+// Get authorizes and loads a resource. It does not run Registry.Context.
 func (r *Resource) Get(ctx context.Context, params any) (any, error) {
 	if err := r.Read(ctx); err != nil {
 		return nil, err
@@ -62,8 +63,21 @@ func (r *Resource) Get(ctx context.Context, params any) (any, error) {
 	return r.load(ctx, params)
 }
 
-func (m *Mutation) serve(c *gin.Context) error {
+// read derives the context through the Context hook, then authorizes and loads.
+func (r *Registry) read(ctx context.Context, res *Resource, params any) (any, error) {
+	ctx, err := r.context(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	return res.Get(ctx, params)
+}
+
+func (r *Registry) serve(c *gin.Context, m *Mutation) error {
 	params, err := decodeParams(m.Params, ginSource(c))
+	if err != nil {
+		return err
+	}
+	ctx, err := r.context(c.Request.Context(), params)
 	if err != nil {
 		return err
 	}
@@ -73,7 +87,6 @@ func (m *Mutation) serve(c *gin.Context) error {
 			return bindError(err)
 		}
 	}
-	ctx := c.Request.Context()
 	if err := m.Check(ctx); err != nil {
 		return err
 	}
@@ -81,16 +94,20 @@ func (m *Mutation) serve(c *gin.Context) error {
 	if err != nil {
 		return err
 	}
-	if m.Status() == http.StatusNoContent {
-		c.Status(http.StatusNoContent)
+	if !m.HasContent() {
+		c.Status(m.Status())
 		return nil
 	}
 	c.JSON(m.Status(), response)
 	return nil
 }
 
-func writeError(c *gin.Context, err error) {
-	e := asError(err)
+func (r *Registry) writeError(c *gin.Context, err error) {
+	if r.RenderError != nil {
+		r.RenderError(c, err)
+		return
+	}
+	e := r.asError(err)
 	if e.Status >= http.StatusInternalServerError {
 		log.Error().Err(err).Str("path", c.FullPath()).Msg("request failed")
 	}
@@ -124,22 +141,34 @@ func ginSource(c *gin.Context) paramSource {
 	}
 }
 
-// decodeParams fills a new value of t from fields tagged `path:"name"` or `query:"name"`.
-// Supported kinds are string, int, bool and pointers to them; an absent parameter stays
-// zero or nil.
+// decodeParams fills a new value of t from fields tagged `path:"name"` or `query:"name"`,
+// embedded structs flattened. Supported kinds are string, int, bool and pointers to them;
+// an absent parameter stays zero or nil.
 func decodeParams(t reflect.Type, source paramSource) (any, error) {
 	out := reflect.New(t)
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
+	if err := decodeFields(out.Elem(), source); err != nil {
+		return nil, err
+	}
+	return out.Interface(), nil
+}
+
+func decodeFields(v reflect.Value, source paramSource) error {
+	for i := 0; i < v.NumField(); i++ {
+		field := v.Type().Field(i)
 		kind, name := paramTag(field)
 		if name == "" {
+			if field.Anonymous && field.Type.Kind() == reflect.Struct {
+				if err := decodeFields(v.Field(i), source); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		raw, ok := source(kind, name)
 		if !ok || raw == "" {
 			continue
 		}
-		target := out.Elem().Field(i)
+		target := v.Field(i)
 		if target.Kind() == reflect.Pointer {
 			target.Set(reflect.New(target.Type().Elem()))
 			target = target.Elem()
@@ -150,20 +179,20 @@ func decodeParams(t reflect.Type, source paramSource) (any, error) {
 		case reflect.Int:
 			n, err := strconv.Atoi(raw)
 			if err != nil {
-				return nil, &Error{Status: http.StatusBadRequest, Code: CodeInvalidRequest, Message: "A parameter is not valid", Fields: map[string]string{name: "int"}}
+				return &Error{Status: http.StatusBadRequest, Code: CodeInvalidRequest, Message: "A parameter is not valid", Fields: map[string]string{name: "int"}}
 			}
 			target.SetInt(int64(n))
 		case reflect.Bool:
 			b, err := strconv.ParseBool(raw)
 			if err != nil {
-				return nil, &Error{Status: http.StatusBadRequest, Code: CodeInvalidRequest, Message: "A parameter is not valid", Fields: map[string]string{name: "bool"}}
+				return &Error{Status: http.StatusBadRequest, Code: CodeInvalidRequest, Message: "A parameter is not valid", Fields: map[string]string{name: "bool"}}
 			}
 			target.SetBool(b)
 		default:
 			panic(fmt.Sprintf("livewire: parameter %s has the unsupported type %s", name, target.Type()))
 		}
 	}
-	return out.Interface(), nil
+	return nil
 }
 
 // paramTag returns the kind ("path" or "query") and name of a parameter field.

@@ -141,11 +141,13 @@ func TestREST(t *testing.T) {
 	}
 }
 
-// TestLiveHooks subscribes over a real socket: the Context hook feeds the loader and Errors
-// maps a failed subscribe.
+// TestLiveHooks subscribes over a real socket: the Context hook feeds the loader, Errors
+// maps a failed subscribe and Partition sees the decoded params.
 func TestLiveHooks(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	engine := NewEngine(&EngineOptions{Registry: hooked()})
+	engine := NewEngine(&EngineOptions{Registry: hooked(), Partition: func(params any) string {
+		return params.(*bookingParams).Tenant
+	}})
 	router := gin.New()
 	router.GET("/ws", engine.Handler())
 	server := httptest.NewServer(router)
@@ -172,6 +174,11 @@ func TestLiveHooks(t *testing.T) {
 	}
 	if f := read(); f.Kind != PushReplace || !strings.Contains(string(f.Payload), `"tenant":"acme"`) {
 		t.Fatalf("push: %+v", f.PushFrame)
+	}
+	var partition string
+	engine.each(func(s *subscription) { partition = s.partition })
+	if partition != "acme" {
+		t.Fatalf("partition %q", partition)
 	}
 
 	_ = conn.WriteJSON(ClientFrame{ID: "2", Op: OpSubscribe, Target: "booking", Params: map[string]string{"tenant": "other", "property": "sea", "id": "b1"}})

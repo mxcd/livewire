@@ -16,28 +16,44 @@ import (
 const DefaultChannel = "livewire"
 
 // Change is one row change as the trigger reports it. ID is empty for tables without an
-// "id" column (join tables).
+// "id" column (join tables); Partition is set by partitioned triggers only.
 type Change struct {
-	Table string `json:"table"`
-	Op    string `json:"op"`
-	ID    string `json:"id"`
+	Table     string `json:"table"`
+	Op        string `json:"op"`
+	ID        string `json:"id"`
+	Partition string `json:"partition,omitempty"`
 }
 
 // InstallTriggers makes every given table NOTIFY channel on each row change. It is
 // idempotent, so it runs on every start after the schema migration.
 func InstallTriggers(ctx context.Context, db *sql.DB, channel string, tables ...string) error {
+	return installTriggers(ctx, db, quoteLiteral(channel), tables)
+}
+
+// InstallPartitionedTriggers is InstallTriggers with the row's column (e.g. its tenant id)
+// reported as the change's Partition, so a change only re-runs the subscriptions of that
+// partition (EngineOptions.Partition). An update reports the new row's value.
+func InstallPartitionedTriggers(ctx context.Context, db *sql.DB, channel, column string, tables ...string) error {
+	return installTriggers(ctx, db, quoteLiteral(channel)+", "+quoteLiteral(column), tables)
+}
+
+func installTriggers(ctx context.Context, db *sql.DB, args string, tables []string) error {
 	statements := []string{`CREATE OR REPLACE FUNCTION livewire_notify() RETURNS trigger AS $$
 DECLARE
 	row jsonb := to_jsonb(CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END);
 BEGIN
-	PERFORM pg_notify(TG_ARGV[0], json_build_object('table', TG_TABLE_NAME, 'op', TG_OP, 'id', COALESCE(row->>'id', ''))::text);
+	IF TG_NARGS > 1 THEN
+		PERFORM pg_notify(TG_ARGV[0], json_build_object('table', TG_TABLE_NAME, 'op', TG_OP, 'id', COALESCE(row->>'id', ''), 'partition', COALESCE(row->>TG_ARGV[1], ''))::text);
+	ELSE
+		PERFORM pg_notify(TG_ARGV[0], json_build_object('table', TG_TABLE_NAME, 'op', TG_OP, 'id', COALESCE(row->>'id', ''))::text);
+	END IF;
 	RETURN NULL;
 END;
 $$ LANGUAGE plpgsql`}
 	for _, table := range tables {
 		statements = append(statements, fmt.Sprintf(
 			`CREATE OR REPLACE TRIGGER livewire_notify AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION livewire_notify(%s)`,
-			quoteIdent(table), quoteLiteral(channel)))
+			quoteIdent(table), args))
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement); err != nil {

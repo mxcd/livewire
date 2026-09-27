@@ -32,6 +32,11 @@ type EngineOptions struct {
 	// the checks and loaders then see; an error closes the socket. Nil keeps the context
 	// of the upgrade request for the socket's lifetime.
 	Revalidate func(ctx context.Context) (context.Context, error)
+	// Partition names a subscription's partition (e.g. its tenant) from its decoded params,
+	// once at subscribe time. A change carrying a partition (InstallPartitionedTriggers)
+	// skips subscriptions of another partition; an empty partition on either side matches
+	// all. Nil leaves every subscription unpartitioned.
+	Partition func(params any) string
 }
 
 // Engine serves live subscriptions: it re-runs a subscription's loader whenever a table
@@ -69,6 +74,9 @@ func (e *Engine) dispatch(change Change) {
 		e.options.OnChange(change)
 	}
 	e.each(func(s *subscription) {
+		if change.Partition != "" && s.partition != "" && change.Partition != s.partition {
+			return
+		}
 		if slices.Contains(s.resource.Tables, change.Table) {
 			s.markDirty(false)
 		}
@@ -242,10 +250,14 @@ func (s *socket) subscribe(frame ClientFrame) {
 		s.enqueue(ResponseFrame{ID: frame.ID, Error: registry.asError(err)})
 		return
 	}
+	partition := ""
+	if s.engine.options.Partition != nil {
+		partition = s.engine.options.Partition(params)
+	}
 	s.mutex.Lock()
 	s.lastID++
 	ctx, cancel := context.WithCancel(s.ctx)
-	sub := &subscription{id: strconv.Itoa(s.lastID), socket: s, resource: res, params: params, ctx: ctx, cancel: cancel, dirty: make(chan struct{}, 1)}
+	sub := &subscription{id: strconv.Itoa(s.lastID), socket: s, resource: res, params: params, partition: partition, ctx: ctx, cancel: cancel, dirty: make(chan struct{}, 1)}
 	s.subscriptions[sub.id] = sub
 	s.mutex.Unlock()
 	s.enqueue(ResponseFrame{ID: frame.ID, OK: true, Subscription: sub.id})
@@ -277,12 +289,13 @@ func (s *socket) unsubscribe(id string) {
 }
 
 type subscription struct {
-	id       string
-	socket   *socket
-	resource *Resource
-	params   any
-	ctx      context.Context
-	cancel   context.CancelFunc
+	id        string
+	socket    *socket
+	resource  *Resource
+	params    any
+	partition string
+	ctx       context.Context
+	cancel    context.CancelFunc
 	// dirty holds at most one pending re-run: changes arriving while a re-run is in flight
 	// collapse into one follow-up.
 	dirty    chan struct{}

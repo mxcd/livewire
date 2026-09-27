@@ -99,29 +99,55 @@ func classify(t reflect.Type) kind {
 	return kindUnknown
 }
 
-// types collects the named struct types reachable from the registry.
+// types collects the named types reachable from the registry, plus what the emitters need
+// to know about them: the listed enums and the ambient path parameters.
 type types struct {
-	byName map[string]reflect.Type
+	byName  map[string]reflect.Type
+	enums   map[reflect.Type][]string
+	ambient map[string]bool
 }
 
 func (ts *types) add(t reflect.Type) {
+	if _, ok := ts.enums[t]; ok {
+		return
+	}
 	switch classify(t) {
 	case kindNullable, kindArray, kindMap:
 		ts.add(t.Elem())
 	case kindStruct:
-		if t.Name() != "" {
-			if other, ok := ts.byName[t.Name()]; ok {
-				if other != t {
-					panic(fmt.Sprintf("gen: two types named %s (%s, %s)", t.Name(), other.PkgPath(), t.PkgPath()))
-				}
-				return
-			}
-			ts.byName[t.Name()] = t
+		if t.Name() != "" && !ts.register(t) {
+			return
 		}
 		for _, f := range jsonFields(t) {
 			ts.add(f.Type)
 		}
 	}
+}
+
+// register names t in types.ts; it returns false when t already is.
+func (ts *types) register(t reflect.Type) bool {
+	name := typeName(t)
+	if other, ok := ts.byName[name]; ok {
+		if other != t {
+			panic(fmt.Sprintf("gen: two types named %s (%s, %s)", name, other.PkgPath(), t.PkgPath()))
+		}
+		return false
+	}
+	ts.byName[name] = t
+	return true
+}
+
+// typeName is a type's name in types.ts and the OpenAPI schemas. A generic instantiation
+// such as ListResponse[github.com/x/model.Booking] becomes ListResponseBooking.
+func typeName(t reflect.Type) string {
+	base, args, ok := strings.Cut(t.Name(), "[")
+	if !ok {
+		return base
+	}
+	for _, arg := range strings.FieldsFunc(args, func(r rune) bool { return strings.ContainsRune("[]*, ", r) }) {
+		base += upperFirst(arg[strings.LastIndex(arg, ".")+1:])
+	}
+	return base
 }
 
 func (ts *types) sorted() []reflect.Type {
@@ -143,6 +169,7 @@ type param struct {
 	Type     reflect.Type
 }
 
+// params lists the parameters of a params struct, embedded structs flattened.
 func params(t reflect.Type) []param {
 	var out []param
 	for i := 0; i < t.NumField(); i++ {
@@ -151,6 +178,8 @@ func params(t reflect.Type) []param {
 			out = append(out, param{name, "path", f.Type})
 		} else if name := f.Tag.Get("query"); name != "" {
 			out = append(out, param{name, "query", f.Type})
+		} else if f.Anonymous && f.Type.Kind() == reflect.Struct {
+			out = append(out, params(f.Type)...)
 		}
 	}
 	return out

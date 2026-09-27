@@ -8,7 +8,12 @@ import (
 	"github.com/mxcd/livewire"
 )
 
-func tsType(t reflect.Type) string {
+// tsType spells a type in TypeScript. Named types live in types.ts; prefix is how the
+// emitting file reaches them ("" in types.ts, "T." in api.ts).
+func (ts *types) tsType(t reflect.Type, prefix string) string {
+	if _, ok := ts.enums[t]; ok {
+		return prefix + typeName(t)
+	}
 	switch classify(t) {
 	case kindString:
 		return "string"
@@ -17,30 +22,30 @@ func tsType(t reflect.Type) string {
 	case kindBool:
 		return "boolean"
 	case kindArray:
-		elem := tsType(t.Elem())
+		elem := ts.tsType(t.Elem(), prefix)
 		if strings.Contains(elem, "|") {
 			elem = "(" + elem + ")"
 		}
 		return elem + "[]"
 	case kindMap:
-		return "Record<string, " + tsType(t.Elem()) + ">"
+		return "Record<string, " + ts.tsType(t.Elem(), prefix) + ">"
 	case kindNullable:
-		return tsType(t.Elem()) + " | null"
+		return ts.tsType(t.Elem(), prefix) + " | null"
 	case kindStruct:
 		if t.Name() != "" {
-			return t.Name()
+			return prefix + typeName(t)
 		}
-		return "{ " + strings.Join(tsFields(t), "; ") + " }"
+		return "{ " + strings.Join(ts.tsFields(t, prefix), "; ") + " }"
 	}
 	return "unknown"
 }
 
-func tsFields(t reflect.Type) []string {
+func (ts *types) tsFields(t reflect.Type, prefix string) []string {
 	var lines []string
 	for _, f := range jsonFields(t) {
-		typ := tsType(f.Type)
+		typ := ts.tsType(f.Type, prefix)
 		if len(f.Enum) > 0 {
-			typ = "'" + strings.Join(f.Enum, "' | '") + "'"
+			typ = tsUnion(f.Enum)
 			if f.Type.Kind() == reflect.Pointer {
 				typ += " | null"
 			}
@@ -54,12 +59,18 @@ func tsFields(t reflect.Type) []string {
 	return lines
 }
 
-func typescriptTypes(ts *types) string {
+func tsUnion(values []string) string { return "'" + strings.Join(values, "' | '") + "'" }
+
+func (ts *types) typescriptTypes() string {
 	var b strings.Builder
 	b.WriteString(generatedHeader)
 	for _, t := range ts.sorted() {
-		fmt.Fprintf(&b, "export interface %s {\n", t.Name())
-		for _, line := range tsFields(t) {
+		if values, ok := ts.enums[t]; ok {
+			fmt.Fprintf(&b, "export type %s = %s\n\n", typeName(t), tsUnion(values))
+			continue
+		}
+		fmt.Fprintf(&b, "export interface %s {\n", typeName(t))
+		for _, line := range ts.tsFields(t, "") {
 			fmt.Fprintf(&b, "  %s\n", line)
 		}
 		b.WriteString("}\n\n")
@@ -67,59 +78,60 @@ func typescriptTypes(ts *types) string {
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
 
-// tsRef is a type as api.ts names it: named structs live in types.ts, everything else is
-// spelled out.
-func tsRef(t reflect.Type) string {
-	if classify(t) == kindStruct && t.Name() != "" {
-		return "T." + t.Name()
-	}
-	return tsType(t)
-}
-
-func typescriptAPI(registry *livewire.Registry) string {
+func (ts *types) typescriptAPI(registry *livewire.Registry) string {
 	var b strings.Builder
-	b.WriteString(generatedHeader)
-	b.WriteString("import { request, target } from './runtime'\nimport type * as T from './types'\n\n")
-
+	usesAmbient := false
 	var liveTargets []string
 	for _, res := range registry.Resources {
 		name := upperFirst(res.Name)
-		result := tsRef(res.DTO)
+		result := ts.tsType(res.DTO, "T.")
 		if res.List {
 			result += "[]"
 		}
-		paramsType, paramsArg := tsParams(&b, name+"Params", res.Params)
-		fmt.Fprintf(&b, "export function get%s(%s): Promise<%s> {\n  return request('GET', %s%s)\n}\n\n",
-			name, paramsArg, result, tsPath(res.Path), tsQuery(res.Params))
+		paramsType, paramsArg := ts.tsParams(&b, name+"Params", res.Params)
+		path, ambient := ts.tsPath(res.Path)
+		usesAmbient = usesAmbient || ambient
+		fmt.Fprintf(&b, "export %sfunction get%s(%s): Promise<%s> {\n  return request('GET', %s%s)\n}\n\n",
+			tsAsync(ambient), name, paramsArg, result, path, tsInit(res.Params, false))
 		if res.Live() {
-			liveTargets = append(liveTargets, fmt.Sprintf("  %s: target<%s, %s>('%s', %t),", res.Name, result, paramsType, res.Name, res.List))
+			liveTargets = append(liveTargets, fmt.Sprintf("  %s: target<%s, %s>('%s', %t%s),", res.Name, result, paramsType, res.Name, res.List, ts.tsAmbient(res.Params)))
 		}
 	}
 	for _, m := range registry.Mutations {
-		_, paramsArg := tsParams(&b, upperFirst(m.Name)+"Params", m.Params)
+		_, paramsArg := ts.tsParams(&b, upperFirst(m.Name)+"Params", m.Params)
+		// Required params come first; optional ones trail the body so callers may omit them.
+		optional := strings.HasSuffix(paramsArg, "= {}")
 		args := []string{}
-		if paramsArg != "" && !strings.HasSuffix(paramsArg, "= {}") {
+		if paramsArg != "" && !optional {
 			args = append(args, paramsArg)
 		}
-		body := ""
 		if m.HasBody() {
-			args = append(args, "body: "+tsRef(m.Request))
-			body = ", { body }"
+			args = append(args, "body: "+ts.tsType(m.Request, "T."))
+		}
+		if optional {
+			args = append(args, paramsArg)
 		}
 		result := "void"
-		if m.Status() != 204 {
-			result = tsRef(m.Response)
+		if m.HasContent() {
+			result = ts.tsType(m.Response, "T.")
 		}
-		fmt.Fprintf(&b, "export function %s(%s): Promise<%s> {\n  return request('%s', %s%s)\n}\n\n",
-			m.Name, strings.Join(args, ", "), result, m.Method, tsPath(m.Path), body)
+		path, ambient := ts.tsPath(m.Path)
+		usesAmbient = usesAmbient || ambient
+		fmt.Fprintf(&b, "export %sfunction %s(%s): Promise<%s> {\n  return request('%s', %s%s)\n}\n\n",
+			tsAsync(ambient), m.Name, strings.Join(args, ", "), result, m.Method, path, tsInit(m.Params, m.HasBody()))
 	}
 	b.WriteString("export const live = {\n" + strings.Join(liveTargets, "\n") + "\n}\n")
-	return b.String()
+
+	imports := "request, target"
+	if usesAmbient {
+		imports = "ambientParam, request, target"
+	}
+	return generatedHeader + "import { " + imports + " } from './runtime'\nimport type * as T from './types'\n\n" + b.String()
 }
 
 // tsParams writes the parameter interface when the type has parameters and returns its
 // name and the function argument declaring it.
-func tsParams(b *strings.Builder, name string, t reflect.Type) (typeName, arg string) {
+func (ts *types) tsParams(b *strings.Builder, name string, t reflect.Type) (iface, arg string) {
 	ps := params(t)
 	if len(ps) == 0 {
 		return "Record<string, never>", ""
@@ -128,10 +140,10 @@ func tsParams(b *strings.Builder, name string, t reflect.Type) (typeName, arg st
 	required := false
 	for _, p := range ps {
 		optional := "?"
-		if p.In == "path" {
+		if p.In == "path" && !ts.ambient[p.Name] {
 			optional, required = "", true
 		}
-		fmt.Fprintf(b, "  %s%s: %s\n", p.Name, optional, strings.TrimSuffix(tsType(p.Type), " | null"))
+		fmt.Fprintf(b, "  %s%s: %s\n", p.Name, optional, strings.TrimSuffix(ts.tsType(p.Type, "T."), " | null"))
 	}
 	b.WriteString("}\n\n")
 	if required {
@@ -140,28 +152,65 @@ func tsParams(b *strings.Builder, name string, t reflect.Type) (typeName, arg st
 	return name, "params: " + name + " = {}"
 }
 
-// tsPath renders a gin path as a template literal over params.
-func tsPath(path string) string {
+// tsPath renders a gin path as a template literal over params; ambient parameters fall
+// back to config.ambient(). It reports whether the path has any.
+func (ts *types) tsPath(path string) (string, bool) {
+	ambient := false
 	parts := strings.Split(path, "/")
 	for i, p := range parts {
-		if strings.HasPrefix(p, ":") {
-			parts[i] = "${encodeURIComponent(String(params." + p[1:] + "))}"
+		if !strings.HasPrefix(p, ":") {
+			continue
+		}
+		if name := p[1:]; ts.ambient[name] {
+			parts[i], ambient = "${ambientParam('"+name+"', params."+name+")}", true
+		} else {
+			parts[i] = "${encodeURIComponent(String(params." + name + "))}"
 		}
 	}
-	return "`" + strings.Join(parts, "/") + "`"
+	return "`" + strings.Join(parts, "/") + "`", ambient
 }
 
-func tsQuery(t reflect.Type) string {
+// tsAsync makes a function with ambient parameters async, so a missing one rejects like
+// every other failure instead of throwing synchronously.
+func tsAsync(ambient bool) string {
+	if ambient {
+		return "async "
+	}
+	return ""
+}
+
+// tsAmbient is a live target's trailing list of ambient path parameters.
+func (ts *types) tsAmbient(t reflect.Type) string {
 	var names []string
 	for _, p := range params(t) {
-		if p.In == "query" {
-			names = append(names, p.Name+": params."+p.Name)
+		if p.In == "path" && ts.ambient[p.Name] {
+			names = append(names, "'"+p.Name+"'")
 		}
 	}
 	if len(names) == 0 {
 		return ""
 	}
-	return ", { query: { " + strings.Join(names, ", ") + " } }"
+	return ", [" + strings.Join(names, ", ") + "]"
+}
+
+// tsInit is request's init argument: the query parameters and the body.
+func tsInit(t reflect.Type, body bool) string {
+	var query, parts []string
+	for _, p := range params(t) {
+		if p.In == "query" {
+			query = append(query, p.Name+": params."+p.Name)
+		}
+	}
+	if len(query) > 0 {
+		parts = append(parts, "query: { "+strings.Join(query, ", ")+" }")
+	}
+	if body {
+		parts = append(parts, "body")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return ", { " + strings.Join(parts, ", ") + " }"
 }
 
 func upperFirst(s string) string {

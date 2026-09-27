@@ -4,12 +4,14 @@ import type { Error as WireError } from './types'
 export interface Target<TData, TParams> {
   name: string
   list: boolean
+  /** Path parameters useLive fills from config.ambient() when the params leave them out. */
+  ambient?: string[]
   __data?: TData
   __params?: TParams
 }
 
-export function target<TData, TParams>(name: string, list: boolean): Target<TData, TParams> {
-  return { name, list }
+export function target<TData, TParams>(name: string, list: boolean, ambient?: string[]): Target<TData, TParams> {
+  return ambient ? { name, list, ambient } : { name, list }
 }
 
 /** The server answered with an error body. */
@@ -19,6 +21,8 @@ export class ApiError extends Error {
     public code: string,
     message: string,
     public fields?: Record<string, string>,
+    /** The parsed error body as the server sent it. */
+    public body?: unknown,
   ) {
     super(message)
   }
@@ -27,12 +31,36 @@ export class ApiError extends Error {
 /** The request never reached the server: offline, DNS, connection refused. */
 export class NetworkError extends Error {}
 
-export const config = {
-  baseUrl: '/api/v1',
+export interface Config {
+  baseUrl: string
   /** Defaults to the same host as the page, below baseUrl. */
+  wsUrl: string
+  headers: () => Record<string, string>
+  /** Values for the ambient path parameters (e.g. the current tenant) a call leaves out. */
+  ambient: () => Record<string, string | undefined>
+  onUnauthorized: () => void
+  /** Sees every failed request right before it throws, after onUnauthorized for a 401. */
+  onError?: (error: ApiError | NetworkError, request: { method: string; path: string }) => void
+}
+
+export const config: Config = {
+  baseUrl: '/api/v1',
   wsUrl: '',
-  headers: (): Record<string, string> => ({}),
-  onUnauthorized: (): void => {},
+  headers: () => ({}),
+  ambient: () => ({}),
+  onUnauthorized: () => {},
+}
+
+/** An ambient path parameter: the call's value, else config.ambient()'s, URI-encoded. */
+export function ambientParam(name: string, value: unknown): string {
+  const resolved = value === undefined || value === null || value === '' ? config.ambient()[name] : String(value)
+  if (!resolved) throw new Error(`The path parameter ${name} is missing`)
+  return encodeURIComponent(resolved)
+}
+
+function failed<E extends ApiError | NetworkError>(error: E, method: string, path: string): E {
+  config.onError?.(error, { method, path })
+  return error
 }
 
 export async function request<T>(
@@ -55,7 +83,7 @@ export async function request<T>(
       ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
     })
   } catch (e) {
-    throw new NetworkError(String(e))
+    throw failed(new NetworkError(String(e)), method, path)
   }
   if (response.status === 204) return undefined as T
   let text: string
@@ -63,14 +91,22 @@ export async function request<T>(
     text = await response.text()
   } catch (e) {
     // The connection died while the body was on its way.
-    throw new NetworkError(String(e))
+    throw failed(new NetworkError(String(e)), method, path)
   }
-  const data: unknown = text ? JSON.parse(text) : undefined
+  let data: unknown
+  try {
+    data = text ? JSON.parse(text) : undefined
+  } catch (e) {
+    // A proxy's HTML error page is still an ApiError; a success must be JSON.
+    if (response.ok) throw e
+    data = text
+  }
   if (!response.ok) {
     if (response.status === 401) config.onUnauthorized()
     // livewire answers {code, message, fields}; auth middleware in front of it often {error, message}.
     const body = (data ?? {}) as Partial<WireError> & { error?: string }
-    throw new ApiError(response.status, body.code ?? body.error ?? 'internal', body.message ?? response.statusText, body.fields)
+    const error = new ApiError(response.status, body.code ?? body.error ?? 'internal', body.message ?? response.statusText, body.fields, data)
+    throw failed(error, method, path)
   }
   return data as T
 }

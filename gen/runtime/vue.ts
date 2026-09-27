@@ -1,5 +1,5 @@
 import { onScopeDispose, ref, shallowRef, toValue, watch, type MaybeRefOrGetter, type Ref } from 'vue'
-import { applyPush, connection, type ApiError, type LiveStatus, type Target } from './runtime'
+import { applyPush, config, connection, type ApiError, type LiveStatus, type Target } from './runtime'
 
 function wireParams(params: unknown): Record<string, string> {
   const out: Record<string, string> = {}
@@ -9,10 +9,18 @@ function wireParams(params: unknown): Record<string, string> {
   return out
 }
 
+/** The target's ambient parameters from config.ambient(), for explicit params to override. */
+function ambientParams(names: string[] = []): Record<string, string> {
+  const values = config.ambient()
+  return wireParams(Object.fromEntries(names.map((name) => [name, values[name]])))
+}
+
 /**
  * Subscribes to a live target for as long as the calling scope lives. `stale` is true
  * until the first push and whenever the connection is down; with `cache` the last data is
- * kept in localStorage and shown (stale) before the socket answers, e.g. offline.
+ * kept in localStorage and shown (stale) before the socket answers, e.g. offline. The
+ * target's ambient parameters come from config.ambient() unless params set them; a reactive
+ * config.ambient() resubscribes when it changes.
  */
 export function useLive<TData, TParams>(
   target: Target<TData, TParams>,
@@ -25,7 +33,7 @@ export function useLive<TData, TParams>(
   let stop: (() => void) | undefined
 
   watch(
-    () => JSON.stringify(wireParams(toValue(params))),
+    () => JSON.stringify({ ...ambientParams(target.ambient), ...wireParams(toValue(params)) }),
     (key) => {
       stop?.()
       const cacheKey = `livewire:${target.name}:${key}`

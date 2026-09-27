@@ -3,7 +3,6 @@ package gen
 import (
 	"embed"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,11 +27,40 @@ type Options struct {
 	// {"bearer": {"type": "http", "scheme": "bearer"}}. Any one of them satisfies an
 	// operation. Nil leaves the document without a security section.
 	SecuritySchemes map[string]any
+	// AmbientParams are path parameters the client fills from config.ambient() when a call
+	// leaves them out, e.g. the tenant of a multi-tenant app. They are optional in the
+	// generated params types.
+	AmbientParams []string
+	// Enums are named string types emitted as TS union types and OpenAPI enums instead of
+	// string. An `enum:"a,b"` tag on a field still wins.
+	Enums []EnumValues
+}
+
+// EnumValues lists the values of a named string type; build it with Enum.
+type EnumValues struct {
+	Type   reflect.Type
+	Values []string
+}
+
+// Enum lists the values of T, e.g. gen.Enum(model.BookingOffer, model.BookingConfirmed).
+func Enum[T ~string](values ...T) EnumValues {
+	out := EnumValues{Type: reflect.TypeFor[T]()}
+	for _, v := range values {
+		out.Values = append(out.Values, string(v))
+	}
+	return out
 }
 
 // Generate writes the TypeScript client and the OpenAPI document for a registry.
 func Generate(registry *livewire.Registry, options Options) error {
-	ts := &types{byName: map[string]reflect.Type{}}
+	ts := &types{byName: map[string]reflect.Type{}, enums: map[reflect.Type][]string{}, ambient: map[string]bool{}}
+	for _, e := range options.Enums {
+		ts.enums[e.Type] = e.Values
+		ts.register(e.Type)
+	}
+	for _, name := range options.AmbientParams {
+		ts.ambient[name] = true
+	}
 	for _, res := range registry.Resources {
 		ts.add(res.DTO)
 	}
@@ -40,7 +68,7 @@ func Generate(registry *livewire.Registry, options Options) error {
 		if m.HasBody() {
 			ts.add(m.Request)
 		}
-		if m.Status() != http.StatusNoContent {
+		if m.HasContent() {
 			ts.add(m.Response)
 		}
 	}
@@ -50,8 +78,8 @@ func Generate(registry *livewire.Registry, options Options) error {
 		return err
 	}
 	files := map[string]string{
-		"types.ts": typescriptTypes(ts),
-		"api.ts":   typescriptAPI(registry),
+		"types.ts": ts.typescriptTypes(),
+		"api.ts":   ts.typescriptAPI(registry),
 	}
 	entries, err := runtime.ReadDir("runtime")
 	if err != nil {
@@ -70,7 +98,7 @@ func Generate(registry *livewire.Registry, options Options) error {
 		}
 	}
 	if options.OpenAPIFile != "" {
-		document, err := openAPI(registry, ts, options)
+		document, err := ts.openAPI(registry, options)
 		if err != nil {
 			return fmt.Errorf("gen: openapi: %w", err)
 		}

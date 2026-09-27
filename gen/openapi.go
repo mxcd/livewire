@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/mxcd/livewire"
@@ -12,7 +13,10 @@ import (
 
 type object = map[string]any
 
-func schema(t reflect.Type) object {
+func (ts *types) schema(t reflect.Type) object {
+	if _, ok := ts.enums[t]; ok {
+		return object{"$ref": "#/components/schemas/" + typeName(t)}
+	}
 	switch classify(t) {
 	case kindString:
 		if t.Name() == "Time" && t.PkgPath() == "time" {
@@ -27,25 +31,25 @@ func schema(t reflect.Type) object {
 	case kindBool:
 		return object{"type": "boolean"}
 	case kindArray:
-		return object{"type": "array", "items": schema(t.Elem())}
+		return object{"type": "array", "items": ts.schema(t.Elem())}
 	case kindMap:
-		return object{"type": "object", "additionalProperties": schema(t.Elem())}
+		return object{"type": "object", "additionalProperties": ts.schema(t.Elem())}
 	case kindNullable:
-		return object{"anyOf": []any{schema(t.Elem()), object{"type": "null"}}}
+		return object{"anyOf": []any{ts.schema(t.Elem()), object{"type": "null"}}}
 	case kindStruct:
 		if t.Name() != "" {
-			return object{"$ref": "#/components/schemas/" + t.Name()}
+			return object{"$ref": "#/components/schemas/" + typeName(t)}
 		}
-		return structSchema(t)
+		return ts.structSchema(t)
 	}
 	return object{}
 }
 
-func structSchema(t reflect.Type) object {
+func (ts *types) structSchema(t reflect.Type) object {
 	properties := object{}
 	required := []string{}
 	for _, f := range jsonFields(t) {
-		s := schema(f.Type)
+		s := ts.schema(f.Type)
 		if len(f.Enum) > 0 {
 			s = object{"type": "string", "enum": f.Enum}
 		}
@@ -61,12 +65,16 @@ func structSchema(t reflect.Type) object {
 	return out
 }
 
-func openAPI(registry *livewire.Registry, ts *types, options Options) ([]byte, error) {
+func (ts *types) openAPI(registry *livewire.Registry, options Options) ([]byte, error) {
 	schemas := object{}
 	for _, t := range ts.sorted() {
-		schemas[t.Name()] = structSchema(t)
+		if values, ok := ts.enums[t]; ok {
+			schemas[typeName(t)] = object{"type": "string", "enum": values}
+		} else {
+			schemas[typeName(t)] = ts.structSchema(t)
+		}
 	}
-	errorResponse := object{"description": "Error", "content": object{"application/json": object{"schema": schema(reflect.TypeFor[livewire.Error]())}}}
+	errorResponse := object{"description": "Error", "content": object{"application/json": object{"schema": ts.schema(reflect.TypeFor[livewire.Error]())}}}
 	paths := map[string]object{}
 	operation := func(path, method string, op object) {
 		p := openAPIPath(path)
@@ -76,7 +84,7 @@ func openAPI(registry *livewire.Registry, ts *types, options Options) ([]byte, e
 		paths[p][strings.ToLower(method)] = op
 	}
 	for _, res := range registry.Resources {
-		result := schema(res.DTO)
+		result := ts.schema(res.DTO)
 		if res.List {
 			result = object{"type": "array", "items": result}
 		}
@@ -87,7 +95,7 @@ func openAPI(registry *livewire.Registry, ts *types, options Options) ([]byte, e
 		operation(res.Path, http.MethodGet, object{
 			"operationId": "get" + upperFirst(res.Name),
 			"description": description,
-			"parameters":  openAPIParams(res.Params),
+			"parameters":  ts.openAPIParams(res.Params),
 			"responses": object{
 				"200":     object{"description": "OK", "content": object{"application/json": object{"schema": result}}},
 				"default": errorResponse,
@@ -97,16 +105,17 @@ func openAPI(registry *livewire.Registry, ts *types, options Options) ([]byte, e
 	for _, m := range registry.Mutations {
 		op := object{
 			"operationId": m.Name,
-			"parameters":  openAPIParams(m.Params),
+			"parameters":  ts.openAPIParams(m.Params),
 			"responses":   object{"default": errorResponse},
 		}
 		if m.HasBody() {
-			op["requestBody"] = object{"required": true, "content": object{"application/json": object{"schema": schema(m.Request)}}}
+			op["requestBody"] = object{"required": true, "content": object{"application/json": object{"schema": ts.schema(m.Request)}}}
 		}
-		if m.Status() == http.StatusNoContent {
-			op["responses"].(object)["204"] = object{"description": "No content"}
+		status := strconv.Itoa(m.Status())
+		if m.HasContent() {
+			op["responses"].(object)[status] = object{"description": http.StatusText(m.Status()), "content": object{"application/json": object{"schema": ts.schema(m.Response)}}}
 		} else {
-			op["responses"].(object)["200"] = object{"description": "OK", "content": object{"application/json": object{"schema": schema(m.Response)}}}
+			op["responses"].(object)[status] = object{"description": "No content"}
 		}
 		operation(m.Path, m.Method, op)
 	}
@@ -133,14 +142,14 @@ func openAPI(registry *livewire.Registry, ts *types, options Options) ([]byte, e
 	return json.MarshalIndent(document, "", "  ")
 }
 
-func openAPIParams(t reflect.Type) []any {
+func (ts *types) openAPIParams(t reflect.Type) []any {
 	out := []any{}
 	for _, p := range params(t) {
 		typ := p.Type
 		if typ.Kind() == reflect.Pointer {
 			typ = typ.Elem()
 		}
-		out = append(out, object{"name": p.Name, "in": p.In, "required": p.In == "path", "schema": schema(typ)})
+		out = append(out, object{"name": p.Name, "in": p.In, "required": p.In == "path", "schema": ts.schema(typ)})
 	}
 	return out
 }

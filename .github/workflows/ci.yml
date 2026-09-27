@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+      # The generator test compiles the generated TypeScript with tsc.
+      - uses: oven-sh/setup-bun@v2
+      - name: Tidy
+        run: go mod tidy && git diff --exit-code go.mod go.sum
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race)
+        run: go test -race ./...
+      - name: Generated client type-checks (exactOptionalPropertyTypes)
+        run: go test -count=1 -v -run TestGeneratedClientTypeChecks ./gen/ | tee /dev/stderr | grep -q -- '--- PASS: TestGeneratedClientTypeChecks'

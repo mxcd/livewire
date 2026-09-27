@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 
-	"github.com/mxcd/home/pkg/livewire"
+	"github.com/mxcd/livewire"
 )
 
 //go:embed runtime/*.ts
@@ -24,6 +24,10 @@ type Options struct {
 	Version     string
 	// BasePath is the API base the routes are mounted under, e.g. "/api/v1".
 	BasePath string
+	// SecuritySchemes are the OpenAPI security schemes by name, e.g.
+	// {"bearer": {"type": "http", "scheme": "bearer"}}. Any one of them satisfies an
+	// operation. Nil leaves the document without a security section.
+	SecuritySchemes map[string]any
 }
 
 // Generate writes the TypeScript client and the OpenAPI document for a registry.

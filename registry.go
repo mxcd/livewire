@@ -29,8 +29,8 @@ type NoContent struct{}
 // Resource is a read: a list of items with an "id" field, or a single object. With Tables
 // set it is live: a change to any of them re-runs the loader for every open subscription.
 type Resource struct {
-	Name   string // wire target and TS identifier, e.g. "shoppingNeeds"
-	Path   string // REST path below the API base, e.g. "/shopping/needs"
+	Name   string // wire target and TS identifier, e.g. "todos"
+	Path   string // REST path below the API base, e.g. "/todos"
 	List   bool
 	DTO    reflect.Type // the item type of a list, the object type otherwise
 	Params reflect.Type
@@ -69,7 +69,7 @@ func NewObject[T any, P any](name, path string, tables []string, read Check, loa
 // Mutation is a write. It is REST only: its effect reaches live subscribers through the
 // tables it changes.
 type Mutation struct {
-	Name     string // TS identifier, e.g. "addNeed"
+	Name     string // TS identifier, e.g. "addTodo"
 	Method   string
 	Path     string
 	Params   reflect.Type

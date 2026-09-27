@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
+	"sort"
 	"strings"
 
-	"github.com/mxcd/home/pkg/livewire"
+	"github.com/mxcd/livewire"
 )
 
 type object = map[string]any
@@ -110,18 +111,24 @@ func openAPI(registry *livewire.Registry, ts *types, options Options) ([]byte, e
 		operation(m.Path, m.Method, op)
 	}
 	document := object{
-		"openapi": "3.1.0",
-		"info":    object{"title": options.Title, "version": options.Version},
-		"servers": []any{object{"url": options.BasePath}},
-		"paths":   paths,
-		"components": object{
-			"schemas": schemas,
-			"securitySchemes": object{
-				"bearer":  object{"type": "http", "scheme": "bearer", "description": "API key"},
-				"session": object{"type": "apiKey", "in": "cookie", "name": "basicauth_session"},
-			},
-		},
-		"security": []any{object{"bearer": []any{}}, object{"session": []any{}}},
+		"openapi":    "3.1.0",
+		"info":       object{"title": options.Title, "version": options.Version},
+		"servers":    []any{object{"url": options.BasePath}},
+		"paths":      paths,
+		"components": object{"schemas": schemas},
+	}
+	if len(options.SecuritySchemes) > 0 {
+		names := make([]string, 0, len(options.SecuritySchemes))
+		for name := range options.SecuritySchemes {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		security := make([]any, len(names))
+		for i, name := range names {
+			security[i] = object{name: []any{}}
+		}
+		document["components"].(object)["securitySchemes"] = options.SecuritySchemes
+		document["security"] = security
 	}
 	return json.MarshalIndent(document, "", "  ")
 }

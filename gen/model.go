@@ -156,7 +156,7 @@ func params(t reflect.Type) []param {
 	return out
 }
 
-// openAPIPath turns gin's /needs/:id into /needs/{id}.
+// openAPIPath turns gin's /todos/:id into /todos/{id}.
 func openAPIPath(path string) string {
 	parts := strings.Split(path, "/")
 	for i, p := range parts {

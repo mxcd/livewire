@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/mxcd/home/pkg/livewire"
+	"github.com/mxcd/livewire"
 )
 
 func tsType(t reflect.Type) string {

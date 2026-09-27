@@ -21,14 +21,14 @@ func state(t *testing.T, items ...item) *listState {
 }
 
 func TestDiff(t *testing.T) {
-	a, b, c := item{"a", "Milch"}, item{"b", "Brot"}, item{"c", "Eier"}
+	a, b, c := item{"a", "milk"}, item{"b", "bread"}, item{"c", "eggs"}
 
 	if d := state(t, a, b).diff(state(t, a, b)); d != nil {
 		t.Fatalf("unchanged list produced a diff: %+v", d)
 	}
 
 	// An edit in place: one upsert, same order.
-	d := state(t, a, item{"b", "Vollkornbrot"}).diff(state(t, a, b))
+	d := state(t, a, item{"b", "rye bread"}).diff(state(t, a, b))
 	if len(d.Upserts) != 1 || len(d.Removes) != 0 || d.Order != nil {
 		t.Fatalf("edit: %+v", d)
 	}

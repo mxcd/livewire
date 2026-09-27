@@ -32,12 +32,32 @@ livewire.NewMutation[P, Req, Resp](name, method, path string, check Check, handl
   `livewire.Errorf(http.StatusForbidden, livewire.CodeForbidden, "...")`) to answer with that
   status and code. Any other error is a 500 whose text stays out of the response.
 - Parameters are a struct with `path:"id"` and `query:"state"` tags (string, int, bool and
-  pointers to them). `livewire.NoParams`, `livewire.NoBody` and `livewire.NoContent` (a 204)
-  fill the slots a declaration does not use.
+  pointers to them); embedded structs are flattened, so `BookingParams` can embed
+  `PropertyParams`, which embeds `TenantParams`. `livewire.NoParams`, `livewire.NoBody` and
+  `livewire.NoContent` (no body, 204 by default) fill the slots a declaration does not use.
+- `mutation.WithStatus(http.StatusCreated)` sets the success status; `.Use(middleware...)` on a
+  resource or mutation puts gin middleware in front of its REST route. Live subscriptions do
+  not run it, so authorization belongs in the checks.
 - Request bodies are validated with gin's `binding` tags; a failure answers
   `{code: "invalid_request", message, fields}` with the fields named as in the JSON body.
 - An `enum:"a,b"` tag on a string field becomes a union type in TypeScript and an enum in
   OpenAPI.
+
+## Registry hooks
+
+```go
+registry := &livewire.Registry{
+	// Derive the context checks and loaders see from the decoded *P, e.g. resolve the tenant.
+	Context: func(ctx context.Context, params any) (context.Context, error) { ... },
+	// Map any error (hook, check, loader, handler, params, body) to the answer.
+	Errors: func(err error) *livewire.Error { ... },
+	// Write REST errors yourself (live frames still use Errors).
+	RenderError: func(c *gin.Context, err error) { ... },
+}
+```
+
+`Context` runs on every REST request, live subscribe and live re-run (after `Revalidate`); an
+error aborts like a failed check.
 
 ## Live engine
 
@@ -61,6 +81,10 @@ api.GET("/ws", engine.Handler()) // behind the same authentication as the REST r
 - `EngineOptions.Revalidate` refreshes the socket's identity before every subscribe and re-run,
   so a revoked key or a lost role takes effect on open sockets; `Engine.CloseWhere` closes
   sockets on demand.
+- Multi-tenant fan-out: `InstallPartitionedTriggers(ctx, db, channel, "tenant_id", tables...)`
+  adds the row's column to the notification as `partition`, and `EngineOptions.Partition`
+  names each subscription's partition from its params. A change then only re-runs
+  subscriptions of its own partition; an empty partition on either side matches all.
 
 ## Generator
 
@@ -70,6 +94,8 @@ gen.Generate(registry, gen.Options{
 	OpenAPIFile: "api/openapi.json",
 	Title:       "Todo", Version: "v1", BasePath: "/api/v1",
 	SecuritySchemes: map[string]any{"bearer": map[string]any{"type": "http", "scheme": "bearer"}},
+	AmbientParams:   []string{"tenant"}, // path params calls may leave out
+	Enums:           []gen.EnumValues{gen.Enum(model.StatusOpen, model.StatusDone)},
 })
 ```
 
@@ -79,6 +105,16 @@ targets), `runtime.ts` (fetch wrapper with `ApiError`/`NetworkError`, one reconn
 with an optional localStorage snapshot, `useLiveStatus()`). The output type-checks with
 `strict`, `exactOptionalPropertyTypes` and `noUncheckedIndexedAccess`; the test suite compiles
 it with `tsc` to keep it that way.
+
+- Ambient path parameters may be left out of a call: the client fills them from
+  `config.ambient()` (and rejects naming the parameter when that has none either), and `useLive`
+  merges them under the explicit params.
+- Listed enums become named union types (`export type Status = 'open' | 'done'`) and OpenAPI
+  enums; generic types get plain names (`ListResponse[model.Booking]` is `ListResponseBooking`).
+- Mutations send their query parameters; optional params trail the body, so
+  `archive(body)` and `archive(body, { before })` both work.
+- `config.onError(error, { method, path })` sees every failed request before it throws, and
+  `ApiError.body` keeps the parsed error body.
 
 ## Minimal example
 

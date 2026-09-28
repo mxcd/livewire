@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -26,30 +27,110 @@ type field struct {
 	Required bool     // `binding:"required"`
 }
 
-// jsonFields lists the JSON properties of a struct as encoding/json writes them,
-// embedded structs flattened.
+// jsonFields lists the JSON properties of a struct as encoding/json writes them: untagged
+// embedded structs are flattened, and of several fields with one JSON name the shallowest
+// wins, at equal depth the only tagged one, and otherwise none.
 func jsonFields(t reflect.Type) []field {
-	var fields []field
-	for _, f := range reflect.VisibleFields(t) {
-		if !f.IsExported() || f.Anonymous {
+	type embedded struct {
+		t     reflect.Type
+		index []int
+	}
+	type candidate struct {
+		field
+		index  []int
+		tagged bool
+	}
+	byName := map[string][]candidate{}
+	visited := map[reflect.Type]bool{}
+	for level := []embedded{{t, nil}}; len(level) > 0; {
+		var next []embedded
+		for _, e := range level {
+			if visited[e.t] {
+				continue
+			}
+			for i := 0; i < e.t.NumField(); i++ {
+				f := e.t.Field(i)
+				tag := f.Tag.Get("json")
+				name, opts, _ := strings.Cut(tag, ",")
+				ft := f.Type
+				if ft.Name() == "" && ft.Kind() == reflect.Pointer {
+					ft = ft.Elem()
+				}
+				index := append(slices.Clone(e.index), i)
+				switch {
+				case tag == "-":
+					continue
+				case name == "" && f.Anonymous && ft.Kind() == reflect.Struct:
+					next = append(next, embedded{ft, index})
+					continue
+				case !f.IsExported():
+					continue
+				}
+				out := field{Name: name, Type: f.Type,
+					Optional: strings.Contains(opts, "omitzero") || (strings.Contains(opts, "omitempty") && omitsEmpty(f.Type)),
+					Required: strings.Contains(f.Tag.Get("binding"), "required")}
+				if out.Name == "" {
+					out.Name = f.Name
+				}
+				if enum := f.Tag.Get("enum"); enum != "" {
+					out.Enum = strings.Split(enum, ",")
+				}
+				byName[out.Name] = append(byName[out.Name], candidate{out, index, name != ""})
+			}
+		}
+		// A type embedded twice on one level yields its fields twice, which cancel out
+		// below; seen on a shallower level it is not explored again.
+		for _, e := range level {
+			visited[e.t] = true
+		}
+		level = next
+	}
+	var chosen []candidate
+	for _, candidates := range byName {
+		slices.SortStableFunc(candidates, func(a, b candidate) int {
+			if len(a.index) != len(b.index) {
+				return len(a.index) - len(b.index)
+			}
+			if a.tagged != b.tagged && a.tagged {
+				return -1
+			}
+			if a.tagged != b.tagged {
+				return 1
+			}
+			return 0
+		})
+		if len(candidates) > 1 && len(candidates[0].index) == len(candidates[1].index) && candidates[0].tagged == candidates[1].tagged {
 			continue
 		}
-		name, opts, _ := strings.Cut(f.Tag.Get("json"), ",")
-		if name == "-" {
-			continue
-		}
-		if name == "" {
-			name = f.Name
-		}
-		out := field{Name: name, Type: f.Type,
-			Optional: strings.Contains(opts, "omitempty") || strings.Contains(opts, "omitzero"),
-			Required: strings.Contains(f.Tag.Get("binding"), "required")}
-		if enum := f.Tag.Get("enum"); enum != "" {
-			out.Enum = strings.Split(enum, ",")
-		}
-		fields = append(fields, out)
+		chosen = append(chosen, candidates[0])
+	}
+	slices.SortFunc(chosen, func(a, b candidate) int { return slices.Compare(a.index, b.index) })
+	fields := make([]field, len(chosen))
+	for i, c := range chosen {
+		fields[i] = c.field
 	}
 	return fields
+}
+
+// omitsEmpty says whether omitempty can drop a value of t: encoding/json never omits a
+// struct (time.Time included) or an array with elements (uuid.UUID).
+func omitsEmpty(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Struct:
+		return false
+	case reflect.Array:
+		return t.Len() == 0
+	}
+	return true
+}
+
+// element is the element type of a slice, array or map. A pointer element is taken as
+// never nil (loaders fill collections from rows), so []*T is T[], not (T | null)[].
+func element(t reflect.Type) reflect.Type {
+	if t.Elem().Kind() == reflect.Pointer {
+		return t.Elem().Elem()
+	}
+	return t.Elem()
 }
 
 // kind classifies a Go type for both emitters.

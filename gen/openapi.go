@@ -31,9 +31,9 @@ func (ts *types) schema(t reflect.Type) object {
 	case kindBool:
 		return object{"type": "boolean"}
 	case kindArray:
-		return object{"type": "array", "items": ts.schema(t.Elem())}
+		return object{"type": "array", "items": ts.schema(element(t))}
 	case kindMap:
-		return object{"type": "object", "additionalProperties": ts.schema(t.Elem())}
+		return object{"type": "object", "additionalProperties": ts.schema(element(t))}
 	case kindNullable:
 		return object{"anyOf": []any{ts.schema(t.Elem()), object{"type": "null"}}}
 	case kindStruct:

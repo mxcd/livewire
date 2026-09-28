@@ -22,13 +22,13 @@ func (ts *types) tsType(t reflect.Type, prefix string) string {
 	case kindBool:
 		return "boolean"
 	case kindArray:
-		elem := ts.tsType(t.Elem(), prefix)
+		elem := ts.tsType(element(t), prefix)
 		if strings.Contains(elem, "|") {
 			elem = "(" + elem + ")"
 		}
 		return elem + "[]"
 	case kindMap:
-		return "Record<string, " + ts.tsType(t.Elem(), prefix) + ">"
+		return "Record<string, " + ts.tsType(element(t), prefix) + ">"
 	case kindNullable:
 		return ts.tsType(t.Elem(), prefix) + " | null"
 	case kindStruct:

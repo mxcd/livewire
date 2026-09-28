@@ -1,5 +1,6 @@
-// Runs the generated client against a stubbed fetch and live connection: ambient path
-// parameters, mutation query parameters, onError and ApiError.body. `bun run` it after
+// Runs the generated client against a stubbed fetch, socket and live connection: ambient
+// path parameters, mutation query parameters, onError, ApiError.body, the 4401 close and
+// useLive's retry. `bun run` it after
 // generating into src/api.
 import { effectScope } from 'vue'
 import { archiveTodos, getPage, live, purgeTodos } from './api/api'
@@ -52,6 +53,28 @@ const gateway = await purgeTodos({ tenant: 'acme' }).then(
 check(gateway instanceof ApiError && gateway.status === 502 && gateway.body === '<html>Bad gateway</html>', 'a non-JSON error body is an ApiError')
 check(seen.join(' | ') === 'Error:true DELETE /tenants/acme/todos | Error:true DELETE /tenants/acme/todos', seen.join(' | '))
 
+// A socket closed with 4401 calls onUnauthorized and still reconnects with backoff.
+class FakeSocket {
+  static OPEN = 1
+  static last: FakeSocket | undefined
+  readyState = 0
+  onclose: ((event: { code: number }) => void) | undefined
+  constructor() {
+    FakeSocket.last = this
+  }
+  send(): void {}
+  close(): void {}
+}
+Object.assign(globalThis, { WebSocket: FakeSocket })
+let unauthorized = 0
+config.onUnauthorized = () => unauthorized++
+const unsubscribe = connection.subscribe(live.page, {}, () => {}, () => {})
+FakeSocket.last?.onclose?.({ code: 4401 })
+const reconnect = (connection as unknown as { retryTimer?: ReturnType<typeof setTimeout> }).retryTimer
+check(unauthorized === 1 && connection.status === 'offline' && reconnect !== undefined, 'a 4401 close calls onUnauthorized and reconnects')
+clearTimeout(reconnect)
+unsubscribe()
+
 const subscribed: string[] = []
 connection.subscribe = (_target, params) => {
   subscribed.push(JSON.stringify(params))
@@ -61,8 +84,8 @@ config.ambient = () => ({ tenant: 'acme' })
 const scope = effectScope()
 scope.run(() => {
   useLive(live.page)
-  useLive(live.page, { tenant: 'other' })
+  useLive(live.page, { tenant: 'other' }).retry()
 })
 scope.stop()
-check(subscribed.join(' | ') === '{"tenant":"acme"} | {"tenant":"other"}', subscribed.join(' | '))
+check(subscribed.join(' | ') === '{"tenant":"acme"} | {"tenant":"other"} | {"tenant":"other"}', subscribed.join(' | '))
 console.log('behavior ok')

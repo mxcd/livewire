@@ -20,7 +20,8 @@ function ambientParams(names: string[] = []): Record<string, string> {
  * until the first push and whenever the connection is down; with `cache` the last data is
  * kept in localStorage and shown (stale) before the socket answers, e.g. offline. The
  * target's ambient parameters come from config.ambient() unless params set them; a reactive
- * config.ambient() resubscribes when it changes.
+ * config.ambient() resubscribes when it changes. `retry()` resubscribes with the current
+ * params, e.g. after an error ended the subscription.
  */
 export function useLive<TData, TParams>(
   target: Target<TData, TParams>,
@@ -31,33 +32,34 @@ export function useLive<TData, TParams>(
   const error = shallowRef<ApiError>()
   const stale = ref(true)
   let stop: (() => void) | undefined
+  let current = ''
 
-  watch(
-    () => JSON.stringify({ ...ambientParams(target.ambient), ...wireParams(toValue(params)) }),
-    (key) => {
-      stop?.()
-      const cacheKey = `livewire:${target.name}:${key}`
-      if (options.cache) {
-        const cached = localStorage.getItem(cacheKey)
-        data.value = cached ? (JSON.parse(cached) as TData) : undefined
-      }
-      stale.value = true
-      stop = connection.subscribe(
-        target as Target<unknown, unknown>,
-        JSON.parse(key) as Record<string, string>,
-        (kind, payload) => {
-          data.value = (target.list ? applyPush(data.value as { id: unknown }[] | undefined, kind, payload) : payload) as TData
-          stale.value = false
-          error.value = undefined
-          if (options.cache) localStorage.setItem(cacheKey, JSON.stringify(data.value))
-        },
-        (e) => {
-          error.value = e
-        },
-      )
-    },
-    { immediate: true },
-  )
+  const subscribe = (key: string) => {
+    current = key
+    stop?.()
+    const cacheKey = `livewire:${target.name}:${key}`
+    if (options.cache) {
+      const cached = localStorage.getItem(cacheKey)
+      data.value = cached ? (JSON.parse(cached) as TData) : undefined
+    }
+    stale.value = true
+    stop = connection.subscribe(
+      target as Target<unknown, unknown>,
+      JSON.parse(key) as Record<string, string>,
+      (kind, payload) => {
+        data.value = (target.list ? applyPush(data.value as { id: unknown }[] | undefined, kind, payload) : payload) as TData
+        stale.value = false
+        error.value = undefined
+        if (options.cache) localStorage.setItem(cacheKey, JSON.stringify(data.value))
+      },
+      (e) => {
+        error.value = e
+      },
+    )
+  }
+  watch(() => JSON.stringify({ ...ambientParams(target.ambient), ...wireParams(toValue(params)) }), subscribe, {
+    immediate: true,
+  })
   const offStatus = connection.onStatus((status) => {
     if (status !== 'live') stale.value = true
   })
@@ -65,7 +67,11 @@ export function useLive<TData, TParams>(
     stop?.()
     offStatus()
   })
-  return { data, error, stale }
+  const retry = () => {
+    error.value = undefined
+    subscribe(current)
+  }
+  return { data, error, stale, retry }
 }
 
 /** The connection state, for an online/offline indicator. */

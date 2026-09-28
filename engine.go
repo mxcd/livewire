@@ -233,10 +233,7 @@ func (s *socket) subscribe(frame ClientFrame) {
 		s.enqueue(ResponseFrame{ID: frame.ID, Error: Errorf(http.StatusNotFound, CodeNotFound, "No live target %q", frame.Target)})
 		return
 	}
-	params, err := decodeParams(res.Params, func(_, name string) (string, bool) {
-		v, ok := frame.Params[name]
-		return v, ok
-	})
+	params, err := decodeParams(res.Params, mapSource(frame.Params))
 	if err == nil {
 		var ctx context.Context
 		if ctx, err = s.identity(); err != nil {

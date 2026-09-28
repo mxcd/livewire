@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -214,12 +217,18 @@ func TestCheckParams(t *testing.T) {
 	type pointerEmbed struct {
 		*tenantParams
 	}
+	type pathList struct {
+		IDs []string `path:"ids"`
+	}
 	for name, declare := range map[string]func(){
 		"parameter id is the unexported field": func() {
 			NewObject("x", "/x/:id", nil, nil, func(context.Context, *unexported) (*booking, error) { return nil, nil })
 		},
 		"parameter at has the unsupported type float64": func() {
 			NewList("x", "/x", nil, nil, func(context.Context, *unsupported) ([]booking, error) { return nil, nil })
+		},
+		"parameter ids has the unsupported type []string": func() {
+			NewObject("x", "/x/:ids", nil, nil, func(context.Context, *pathList) (*booking, error) { return nil, nil })
 		},
 		"embed params structs by value": func() {
 			NewMutation("x", http.MethodPost, "/x/:tenant", nil, func(context.Context, *pointerEmbed, *NoBody) (*NoContent, error) { return nil, nil })
@@ -233,5 +242,45 @@ func TestCheckParams(t *testing.T) {
 			}()
 			declare()
 		}()
+	}
+}
+
+type status string
+
+type listParams struct {
+	Status []string `query:"status"`
+	Kinds  []status `query:"kind"`
+}
+
+// TestListParams decodes a string-slice query parameter from repeated keys, commas and a
+// mix of both on REST, and from one comma-separated value on a live subscribe.
+func TestListParams(t *testing.T) {
+	r := &Registry{}
+	r.Add(NewList("items", "/items", nil, func(context.Context) error { return nil },
+		func(_ context.Context, p *listParams) ([]item, error) {
+			var items []item
+			for _, s := range p.Status {
+				items = append(items, item{ID: s, Name: fmt.Sprint(p.Kinds, p.Status == nil)})
+			}
+			return items, nil
+		}))
+	for query, want := range map[string]string{
+		"status=a&status=b":           `[{"id":"a","name":"[] false"},{"id":"b","name":"[] false"}]`,
+		"status=a,b&kind=x":           `[{"id":"a","name":"[x] false"},{"id":"b","name":"[x] false"}]`,
+		"status=a,,b&status=c&kind=,": `[{"id":"a","name":"[] false"},{"id":"b","name":"[] false"},{"id":"c","name":"[] false"}]`,
+		"other=1":                     `[]`,
+	} {
+		if w := serve(r, http.MethodGet, "/items?"+query); w.Body.String() != want {
+			t.Errorf("?%s: %d %s, want %s", query, w.Code, w.Body, want)
+		}
+	}
+
+	params, err := decodeParams(reflect.TypeFor[listParams](), mapSource(map[string]string{"status": "a,b", "kind": "x,y"}))
+	if p := params.(*listParams); err != nil || !slices.Equal(p.Status, []string{"a", "b"}) || !slices.Equal(p.Kinds, []status{"x", "y"}) {
+		t.Fatalf("live: %+v %v", params, err)
+	}
+	params, _ = decodeParams(reflect.TypeFor[listParams](), mapSource(map[string]string{"status": ""}))
+	if p := params.(*listParams); p.Status != nil {
+		t.Fatalf("an empty value decoded to %#v", p.Status)
 	}
 }

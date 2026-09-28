@@ -3,6 +3,7 @@ package gen_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -65,9 +66,10 @@ type board struct {
 }
 
 type listParams struct {
-	Board string  `path:"board"`
-	State *string `query:"state"`
-	Limit *int    `query:"limit"`
+	Board string   `path:"board"`
+	State *string  `query:"state"`
+	Limit *int     `query:"limit"`
+	Tags  []string `query:"tag"`
 }
 
 type idParams struct {
@@ -157,12 +159,14 @@ export async function tenanted(): Promise<void> {
 
 export async function run(): Promise<void> {
   const todos = await getTodos({ board: 'home' })
-  const open = await getTodos({ board: 'home', state: 'open', limit: 10 })
+  const open = await getTodos({ board: 'home', state: 'open', limit: 10, tag: ['a', 'b'] })
+  const tags: string[] | undefined = ({} as Parameters<typeof getTodos>[0]).tag
   const created = await addTodo({ board: 'home' }, { title: 'Milk' })
   await addTodo({ board: 'home' }, { title: 'Bread', note: null })
   await deleteTodo({ id: created.id })
   const board = await getBoard()
-  console.log(todos.length, open.length, board.count)
+  console.log(todos.length, open.length, board.count, tags)
+  useLive(live.todos, { board: 'home', tag: ['a'] })
   const { data, stale, error } = useLive(live.todos, { board: 'home' }, { cache: true })
   const object = useLive(live.board)
   const status = useLiveStatus()
@@ -227,7 +231,8 @@ func TestGeneratedShapes(t *testing.T) {
 		"export async function renameTodo(params: RenameTodoParams, body: T.addTodo): Promise<T.todo> {",
 		"  priority?: T.priority\n",
 		"page: target<T.PageTodo, PageParams>('page', false, ['tenant']),",
-		"export function addTodo(params: AddTodoParams, body: T.addTodo): Promise<T.todo> {\n  return request('POST', `/boards/${encodeURIComponent(String(params.board))}/todos`, { query: { state: params.state, limit: params.limit }, body })",
+		"export function addTodo(params: AddTodoParams, body: T.addTodo): Promise<T.todo> {\n  return request('POST', `/boards/${encodeURIComponent(String(params.board))}/todos`, { query: { state: params.state, limit: params.limit, tag: params.tag }, body })",
+		"  tag?: string[]\n",
 	} {
 		if !strings.Contains(string(api), want) {
 			t.Errorf("api.ts lacks %s", want)
@@ -246,6 +251,14 @@ func TestGeneratedShapes(t *testing.T) {
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
+	}
+	var generic struct {
+		Paths map[string]map[string]struct{ Parameters []map[string]any }
+	}
+	_ = json.Unmarshal(raw, &generic)
+	if ps := generic.Paths["/boards/{board}/todos"]["get"].Parameters; len(ps) != 4 || ps[3]["name"] != "tag" || ps[3]["style"] != "form" ||
+		ps[3]["explode"] != true || fmt.Sprint(ps[3]["schema"]) != "map[items:map[type:string] type:array]" {
+		t.Errorf("list query parameter: %v", ps)
 	}
 	archive := doc.Paths["/tenants/{tenant}/archive"]["post"]
 	if len(archive.Parameters) != 3 || archive.Parameters[1].Name != "before" || archive.Parameters[1].In != "query" {

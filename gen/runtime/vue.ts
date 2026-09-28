@@ -4,7 +4,8 @@ import { applyPush, config, connection, type ApiError, type LiveStatus, type Tar
 function wireParams(params: unknown): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries((params ?? {}) as Record<string, unknown>)) {
-    if (value !== undefined && value !== null) out[key] = String(value)
+    // A list goes as one comma-separated value, which the server splits again.
+    if (value !== undefined && value !== null) out[key] = Array.isArray(value) ? value.join(',') : String(value)
   }
   return out
 }

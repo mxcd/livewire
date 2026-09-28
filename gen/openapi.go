@@ -149,7 +149,11 @@ func (ts *types) openAPIParams(t reflect.Type) []any {
 		if typ.Kind() == reflect.Pointer {
 			typ = typ.Elem()
 		}
-		out = append(out, object{"name": p.Name, "in": p.In, "required": p.In == "path", "schema": ts.schema(typ)})
+		param := object{"name": p.Name, "in": p.In, "required": p.In == "path", "schema": ts.schema(typ)}
+		if typ.Kind() == reflect.Slice {
+			param["style"], param["explode"] = "form", true
+		}
+		out = append(out, param)
 	}
 	return out
 }

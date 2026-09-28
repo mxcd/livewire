@@ -1,9 +1,9 @@
 // Runs the generated client against a stubbed fetch, socket and live connection: ambient
-// path parameters, mutation query parameters, onError, ApiError.body, the 4401 close and
-// useLive's retry. `bun run` it after
+// path parameters, mutation and list query parameters, onError, ApiError.body, the 4401
+// close and useLive's retry. `bun run` it after
 // generating into src/api.
 import { effectScope } from 'vue'
-import { archiveTodos, getPage, live, purgeTodos } from './api/api'
+import { archiveTodos, getPage, getTodos, live, purgeTodos } from './api/api'
 import { ApiError, config, connection } from './api/runtime'
 import { useLive } from './api/vue'
 
@@ -25,8 +25,10 @@ config.ambient = () => ({ tenant: 'acme' })
 await getPage()
 await getPage({ tenant: 'o/ther' })
 await archiveTodos({ title: 'x' }, { before: 'b' })
+await getTodos({ board: 'b', tag: ['x', 'y'], limit: 2 })
 check(
-  calls.join(' | ') === 'GET /api/v1/tenants/acme/page | GET /api/v1/tenants/o%2Fther/page | POST /api/v1/tenants/acme/archive?before=b',
+  calls.join(' | ') ===
+    'GET /api/v1/tenants/acme/page | GET /api/v1/tenants/o%2Fther/page | POST /api/v1/tenants/acme/archive?before=b | GET /api/v1/boards/b/todos?limit=2&tag=x&tag=y',
   calls.join(' | '),
 )
 
@@ -85,7 +87,11 @@ const scope = effectScope()
 scope.run(() => {
   useLive(live.page)
   useLive(live.page, { tenant: 'other' }).retry()
+  useLive(live.todos, { board: 'b', tag: ['x', 'y'] })
 })
 scope.stop()
-check(subscribed.join(' | ') === '{"tenant":"acme"} | {"tenant":"other"} | {"tenant":"other"}', subscribed.join(' | '))
+check(
+  subscribed.join(' | ') === '{"tenant":"acme"} | {"tenant":"other"} | {"tenant":"other"} | {"board":"b","tag":"x,y"}',
+  subscribed.join(' | '),
+)
 console.log('behavior ok')

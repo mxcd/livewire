@@ -130,22 +130,32 @@ func bindError(err error) *Error {
 	return e
 }
 
-// paramSource looks a parameter up by its tag kind ("path" or "query") and name.
-type paramSource func(kind, name string) (string, bool)
+// paramSource looks a parameter up by its tag kind ("path" or "query") and name; a query
+// key may repeat.
+type paramSource func(kind, name string) ([]string, bool)
 
 func ginSource(c *gin.Context) paramSource {
-	return func(kind, name string) (string, bool) {
+	return func(kind, name string) ([]string, bool) {
 		if kind == "path" {
 			v := c.Param(name)
-			return v, v != ""
+			return []string{v}, v != ""
 		}
-		return c.GetQuery(name)
+		return c.GetQueryArray(name)
+	}
+}
+
+// mapSource reads the params of a live subscribe frame.
+func mapSource(params map[string]string) paramSource {
+	return func(_, name string) ([]string, bool) {
+		v, ok := params[name]
+		return []string{v}, ok
 	}
 }
 
 // decodeParams fills a new value of t from fields tagged `path:"name"` or `query:"name"`,
-// embedded structs flattened. Supported kinds are string, int, bool and pointers to them;
-// an absent parameter stays zero or nil.
+// embedded structs flattened. Supported kinds are string, int, bool and pointers to them,
+// plus string slices for query parameters: every value of a repeated key, each split on
+// commas, empty items dropped. An absent parameter stays zero or nil.
 func decodeParams(t reflect.Type, source paramSource) (any, error) {
 	out := reflect.New(t)
 	if err := decodeFields(out.Elem(), source); err != nil {
@@ -166,11 +176,25 @@ func decodeFields(v reflect.Value, source paramSource) error {
 			}
 			continue
 		}
-		raw, ok := source(kind, name)
-		if !ok || raw == "" {
+		values, ok := source(kind, name)
+		if !ok || len(values) == 0 {
 			continue
 		}
 		target := v.Field(i)
+		if target.Kind() == reflect.Slice {
+			for _, value := range values {
+				for _, item := range strings.Split(value, ",") {
+					if item != "" {
+						target.Set(reflect.Append(target, reflect.ValueOf(item).Convert(target.Type().Elem())))
+					}
+				}
+			}
+			continue
+		}
+		raw := values[0]
+		if raw == "" {
+			continue
+		}
 		if target.Kind() == reflect.Pointer {
 			target.Set(reflect.New(target.Type().Elem()))
 			target = target.Elem()
@@ -205,15 +229,16 @@ func checkParams(t reflect.Type) {
 	}
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		_, name := paramTag(f)
+		kind, name := paramTag(f)
 		base := f.Type
 		if base.Kind() == reflect.Pointer {
 			base = base.Elem()
 		}
+		list := kind == "query" && f.Type.Kind() == reflect.Slice && f.Type.Elem().Kind() == reflect.String
 		switch {
 		case name != "" && !f.IsExported():
 			panic(fmt.Sprintf("livewire: parameter %s is the unexported field %s.%s", name, t, f.Name))
-		case name != "" && base.Kind() != reflect.String && base.Kind() != reflect.Int && base.Kind() != reflect.Bool:
+		case name != "" && !list && base.Kind() != reflect.String && base.Kind() != reflect.Int && base.Kind() != reflect.Bool:
 			panic(fmt.Sprintf("livewire: parameter %s has the unsupported type %s", name, f.Type))
 		case name == "" && f.Anonymous && f.Type.Kind() == reflect.Struct:
 			checkParams(f.Type)

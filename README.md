@@ -32,7 +32,9 @@ livewire.NewMutation[P, Req, Resp](name, method, path string, check Check, handl
   `livewire.Errorf(http.StatusForbidden, livewire.CodeForbidden, "...")`) to answer with that
   status and code. Any other error is a 500 whose text stays out of the response.
 - Parameters are a struct with `path:"id"` and `query:"state"` tags (string, int, bool and
-  pointers to them); embedded structs are flattened, so `BookingParams` can embed
+  pointers to them, and string slices for query parameters, read from repeated keys and
+  comma-separated values alike, `?status=a&status=b` or `?status=a,b`); embedded structs are
+  flattened, so `BookingParams` can embed
   `PropertyParams`, which embeds `TenantParams`. `livewire.NoParams`, `livewire.NoBody` and
   `livewire.NoContent` (no body, 204 by default) fill the slots a declaration does not use.
 - `mutation.WithStatus(http.StatusCreated)` sets the success status; `.Use(middleware...)` on a

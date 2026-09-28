@@ -70,7 +70,9 @@ export async function request<T>(
 ): Promise<T> {
   const url = new URL(config.baseUrl + path, window.location.origin)
   for (const [key, value] of Object.entries(init.query ?? {})) {
-    if (value !== undefined && value !== null) url.searchParams.set(key, String(value))
+    if (value === undefined || value === null) continue
+    // A list goes as a repeated key: ?status=a&status=b.
+    for (const item of Array.isArray(value) ? (value as unknown[]) : [value]) url.searchParams.append(key, String(item))
   }
   const headers: Record<string, string> = { ...config.headers() }
   if (init.body !== undefined) headers['Content-Type'] = 'application/json'

@@ -56,6 +56,7 @@ func (r *Resource) Use(handlers ...gin.HandlerFunc) *Resource {
 
 // NewList declares a list resource. Every item must marshal to a JSON object with an "id".
 func NewList[T any, P any](name, path string, tables []string, read Check, load func(ctx context.Context, params *P) ([]T, error)) *Resource {
+	checkParams(reflect.TypeFor[P]())
 	return &Resource{
 		Name: name, Path: path, List: true, Tables: tables, Read: read,
 		DTO: reflect.TypeFor[T](), Params: reflect.TypeFor[P](),
@@ -71,6 +72,7 @@ func NewList[T any, P any](name, path string, tables []string, read Check, load 
 
 // NewObject declares a single-object resource.
 func NewObject[T any, P any](name, path string, tables []string, read Check, load func(ctx context.Context, params *P) (*T, error)) *Resource {
+	checkParams(reflect.TypeFor[P]())
 	return &Resource{
 		Name: name, Path: path, Tables: tables, Read: read,
 		DTO: reflect.TypeFor[T](), Params: reflect.TypeFor[P](),
@@ -98,6 +100,7 @@ type Mutation struct {
 // NewMutation declares a write. Use NoParams, NoBody and NoContent where they apply; a
 // NoContent response answers 204 unless WithStatus says otherwise.
 func NewMutation[P any, Req any, Resp any](name, method, path string, check Check, handle func(ctx context.Context, params *P, body *Req) (*Resp, error)) *Mutation {
+	checkParams(reflect.TypeFor[P]())
 	return &Mutation{
 		Name: name, Method: method, Path: path, Check: check,
 		Params: reflect.TypeFor[P](), Request: reflect.TypeFor[Req](), Response: reflect.TypeFor[Resp](),

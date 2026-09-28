@@ -81,14 +81,16 @@ func (r *Registry) serve(c *gin.Context, m *Mutation) error {
 	if err != nil {
 		return err
 	}
+	// The check comes before the body, so a caller without access never learns more than
+	// that, whatever it sends.
+	if err := m.Check(ctx); err != nil {
+		return err
+	}
 	body := reflect.New(m.Request).Interface()
 	if m.HasBody() {
 		if err := c.ShouldBindWith(body, binding.JSON); err != nil {
 			return bindError(err)
 		}
-	}
-	if err := m.Check(ctx); err != nil {
-		return err
 	}
 	response, err := m.handle(ctx, params, body)
 	if err != nil {
@@ -193,6 +195,32 @@ func decodeFields(v reflect.Value, source paramSource) error {
 		}
 	}
 	return nil
+}
+
+// checkParams panics when decodeParams could not fill t, so a bad params struct fails at
+// declaration time instead of on the first request that sets the parameter.
+func checkParams(t reflect.Type) {
+	if t.Kind() != reflect.Struct {
+		panic(fmt.Sprintf("livewire: params type %s is not a struct", t))
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		_, name := paramTag(f)
+		base := f.Type
+		if base.Kind() == reflect.Pointer {
+			base = base.Elem()
+		}
+		switch {
+		case name != "" && !f.IsExported():
+			panic(fmt.Sprintf("livewire: parameter %s is the unexported field %s.%s", name, t, f.Name))
+		case name != "" && base.Kind() != reflect.String && base.Kind() != reflect.Int && base.Kind() != reflect.Bool:
+			panic(fmt.Sprintf("livewire: parameter %s has the unsupported type %s", name, f.Type))
+		case name == "" && f.Anonymous && f.Type.Kind() == reflect.Struct:
+			checkParams(f.Type)
+		case name == "" && f.Anonymous && base.Kind() == reflect.Struct:
+			panic(fmt.Sprintf("livewire: %s embeds %s; embed params structs by value", t, f.Type))
+		}
+	}
 }
 
 // paramTag returns the kind ("path" or "query") and name of a parameter field.

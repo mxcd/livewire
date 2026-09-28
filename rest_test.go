@@ -86,16 +86,27 @@ func hooked() *Registry {
 		NewMutation("remove", http.MethodDelete, "/t/:tenant/p/:property/bookings/:id", needsTenant,
 			func(context.Context, *bookingParams, *NoBody) (*NoContent, error) { return nil, nil }).
 			WithStatus(http.StatusAccepted),
+		NewMutation("rename", http.MethodPut, "/t/:tenant/p/:property/bookings/:id",
+			func(context.Context) error { return Errorf(http.StatusForbidden, CodeForbidden, "No") },
+			func(context.Context, *bookingParams, *struct {
+				Title string `json:"title" binding:"required"`
+			}) (*booking, error) {
+				return nil, nil
+			}),
 	)
 	return r
 }
 
 func serve(r *Registry, method, path string) *httptest.ResponseRecorder {
+	return serveBody(r, method, path, "")
+}
+
+func serveBody(r *Registry, method, path, body string) *httptest.ResponseRecorder {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	r.Mount(router)
 	w := httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest(method, path, nil))
+	router.ServeHTTP(w, httptest.NewRequest(method, path, strings.NewReader(body)))
 	return w
 }
 
@@ -122,6 +133,12 @@ func TestREST(t *testing.T) {
 	w = serve(r, http.MethodDelete, "/t/acme/p/sea/bookings/b1")
 	if w.Code != http.StatusAccepted || w.Body.Len() != 0 {
 		t.Fatalf("no content: %d %q", w.Code, w.Body)
+	}
+
+	// The check runs before the body is read: no access answers 403 whatever the body.
+	w = serveBody(r, http.MethodPut, "/t/acme/p/sea/bookings/b1", "{not json")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("check before body: %d %s", w.Code, w.Body)
 	}
 
 	var rendered error
@@ -184,5 +201,37 @@ func TestLiveHooks(t *testing.T) {
 	_ = conn.WriteJSON(ClientFrame{ID: "2", Op: OpSubscribe, Target: "booking", Params: map[string]string{"tenant": "other", "property": "sea", "id": "b1"}})
 	if f := read(); f.OK || f.Error == nil || f.Error.Code != CodeNotFound {
 		t.Fatalf("unknown tenant: %+v", f.ResponseFrame)
+	}
+}
+
+func TestCheckParams(t *testing.T) {
+	type unexported struct {
+		id string `path:"id"`
+	}
+	type unsupported struct {
+		At float64 `query:"at"`
+	}
+	type pointerEmbed struct {
+		*tenantParams
+	}
+	for name, declare := range map[string]func(){
+		"parameter id is the unexported field": func() {
+			NewObject("x", "/x/:id", nil, nil, func(context.Context, *unexported) (*booking, error) { return nil, nil })
+		},
+		"parameter at has the unsupported type float64": func() {
+			NewList("x", "/x", nil, nil, func(context.Context, *unsupported) ([]booking, error) { return nil, nil })
+		},
+		"embed params structs by value": func() {
+			NewMutation("x", http.MethodPost, "/x/:tenant", nil, func(context.Context, *pointerEmbed, *NoBody) (*NoContent, error) { return nil, nil })
+		},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r == nil || !strings.Contains(r.(string), name) {
+					t.Errorf("want a panic with %q, got %v", name, r)
+				}
+			}()
+			declare()
+		}()
 	}
 }

@@ -39,7 +39,10 @@ livewire.NewMutation[P, Req, Resp](name, method, path string, check Check, handl
   resource or mutation puts gin middleware in front of its REST route. Live subscriptions do
   not run it, so authorization belongs in the checks.
 - Request bodies are validated with gin's `binding` tags; a failure answers
-  `{code: "invalid_request", message, fields}` with the fields named as in the JSON body.
+  `{code: "invalid_request", message, fields}` with the fields named as in the JSON body. The
+  check runs first, so a caller without access gets the check's error whatever it sends.
+- A params struct decoding cannot fill (an unexported or unsupported parameter field, an
+  embedded pointer) panics when it is declared.
 - An `enum:"a,b"` tag on a string field becomes a union type in TypeScript and an enum in
   OpenAPI.
 
@@ -109,6 +112,12 @@ it with `tsc` to keep it that way.
 - Ambient path parameters may be left out of a call: the client fills them from
   `config.ambient()` (and rejects naming the parameter when that has none either), and `useLive`
   merges them under the explicit params.
+- Fields follow encoding/json: of promoted fields with one JSON name the shallowest wins,
+  `omitempty` only makes a field optional when encoding/json can omit it (not on structs,
+  `time.Time` or `uuid.UUID`), and slices and maps of pointers are assumed to hold no nil
+  (`T[]`).
+- `useLive` also returns `retry()`, which resubscribes after an error ended the
+  subscription; a socket closed as unauthorized (4401) calls `config.onUnauthorized()`.
 - Listed enums become named union types (`export type Status = 'open' | 'done'`) and OpenAPI
   enums; generic types get plain names (`ListResponse[model.Booking]` is `ListResponseBooking`).
 - Mutations send their query parameters; optional params trail the body, so
